@@ -1,0 +1,311 @@
+---
+title: "Analyse du risque de récidive du syndrome oculorrespiratoire après vaccination contre la grippe »."
+author: "Saa Moussa TENGUIANO,Michelle, Biostatistique, Université Laval"
+output:
+  html_document:
+    theme: readable
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    number_sections: true
+    css: style.css
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+**Resumé:**
+Ce rapport propose une analyse approfondie du service de vélopartage BIXI à Montréal pour l’année 2018. L’étude vise à identifier les principaux déterminants de la demande,notamment les conditions météorologiques, les jours fériés, le statut d’abonnement et la durée moyenne des trajets ainsi qu’à évaluer la répartition spatiale de l’offre à travers le taux d’épuisement des stations. Les modèles de comptage employés intègrent la surdispersion et permettent d’estimer l’effet multiplicatif de chaque facteur explicatif.
+
+# _Introduction_
+
+# _Analyse descriptive_
+
+## _Importation des des données_
+
+### Appel aux packages nécéssaires 
+
+```{r , message=FALSE, warning=FALSE}
+library(gee)
+library(gt)
+library(dplyr)
+library(httr)
+library(ggplot2)
+```
+### Lecture des données
+```{r import, message=FALSE, warning=FALSE}
+load("~/Desktop/DevoirEP7010/vaccination.RData")
+```
+## Description des données
+```{r description,message=FALSE, warning=FALSE,comment=""}
+## Création de la variable traitement reçu
+
+vaccination <- tmp %>%
+  mutate(
+    traitement_recu = case_when(
+      traitement == "Placebo-Fluviral" & dose == 1 ~ "Placebo",
+      traitement == "Placebo-Fluviral" & dose == 2 ~ "Fluviral",
+      traitement == "Fluviral-Placebo" & dose == 1 ~ "Fluviral",
+      traitement == "Fluviral-Placebo" & dose == 2 ~ "Placebo",
+      traitement == "Placebo-Vaxigrip" & dose == 1 ~ "Placebo",
+      traitement == "Placebo-Vaxigrip" & dose == 2 ~ "Vaxigrip",
+      traitement == "Vaxigrip-Placebo" & dose == 1 ~ "Vaxigrip",
+      traitement == "Vaxigrip-Placebo" & dose == 2 ~ "Placebo",
+      TRUE ~ NA_character_
+    )
+  )
+vaccination <- vaccination %>%
+  mutate(SOR_bin = ifelse(SOR == 1, 1, 0))
+
+dim(vaccination)
+vaccination %>%
+  head(6) %>%
+  gt() %>%
+  tab_header(
+    title = "Aperçu des 6 premières lignes de la base"
+  ) %>%
+  opt_table_outline(
+    color ="#6c8ebf"
+  ) %>%
+  opt_row_striping()
+
+```
+La base de données *vaccination* comprend **192 observations** pour 146 participants réparties sur **6 variables principales** :
+
+- **age** : âge du participant au moment de l’inclusion.  
+- **catégorie** : variable factorielle à trois modalités (A, B et C) définissant le groupe d’appartenance des participants.  
+  - **Groupe A** : participants ayant présenté un SOR en 2000-2001 et **non revaccinés** contre la grippe.  
+  - **Groupe B** : participants ayant présenté un SOR en 2000-2001 et **revaccinés** en 2001-2002.  
+  - **Groupe C** : participants présentant une **première occurrence** de SOR en 2001-2002.  
+- **SOR** : indicateur de la présence d’au moins un symptôme de SOR survenant dans les **24 heures** suivant la vaccination.  
+- **dose** : ordre des interventions, correspondant à la **première ou la deuxième injection**.  
+- **identifiant** : identifiant unique attribué à chaque participant, chacun ayant **deux observations** correspondant aux deux doses reçues.  
+- **région** : région de recrutement des participants (Vancouver, Québec ou Montérégie).  
+- **traitement** : intervention administrée à chaque visite, précisant **placebo ou vaccin**, ainsi que le type de vaccin utilisé.
+ 
+### Caractéristiques des 146 participants par groupe
+```{r,message=FALSE, warning=FALSE}
+
+prop_region <- apply(table(vaccination$region, vaccination$CATEGORIE), 2, prop.table) * 100
+
+prop_region <- as.data.frame(prop_region)
+prop_region<- tibble::rownames_to_column(prop_region, "Région")
+
+prop_region %>%
+  gt() %>%
+  tab_header(
+    title = "Répartition des participants par région et groupe"
+  ) %>%
+  fmt_number(
+    columns = vars(A, B, C),  
+    decimals = 0
+  ) %>%
+  opt_row_striping() %>%
+  opt_table_outline()
+
+```
+
+La répartition géographique des participants varie selon le groupe ORS : le **groupe A** est majoritairement recruté à Vancouver et Montérégie, avec une faible représentation à Québec ; le **groupe B** est réparti de manière relativement équilibrée entre Montérégie et Québec, avec moins de participants à Vancouver ; enfin, le **groupe C** est principalement recruté à Québec, avec une présence beaucoup plus faible à Montérégie et Vancouver.
+
+
+# _Comparaison des risques de récidive du syndrome oculo-respiratoire entre les vaccins et le placébo_
+
+## Comparaison des taux d'incidence du syndrome oculo-respiratoire entre le vaccin  fluviral et le placébo
+### Calcul des proportions d'incidice
+Le tableau ci-dessus présente le nombre de cas de syndrome oculo‑respiratoire chez les patients ayant reçu le placebo, comparé à ceux ayant reçu le Fluviral, ainsi que les proportion d’incidence correspondants.
+
+```{r,message=FALSE, warning=FALSE,echo=FALSE}
+
+# Filtrer les séquences Placebo vs Fluviral et garder uniquement les doses Placebo ou Fluviral
+df_placebo_fluviral <- vaccination %>%
+  filter(
+    traitement %in% c("Placebo-Fluviral", "Fluviral-Placebo"),
+    traitement_recu %in% c("Placebo", "Fluviral")
+  )
+
+# Résumé : total, cas, incidence par produit
+resume_placebo_fluviral <- df_placebo_fluviral %>%
+  group_by(traitement_recu) %>%
+  summarise(
+    total = n(),
+    cas = sum(SOR_bin),
+    Incidence = mean(SOR_bin)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    Incidence = round(Incidence * 100, 1)  # convertir en %
+  )
+
+# Tableau gt
+table_gt <- resume_placebo_fluviral %>%
+  gt() %>%
+  tab_header(
+    title = "Résumé des cas : Placebo vs Fluviral"
+  ) %>%
+  cols_label(
+    traitement_recu = "Vaccin reçu",
+    total = "Nombre total",
+    cas = "Nombre de cas",
+    Incidence = "Incidence (%)"
+  ) %>%
+  fmt_number(
+    columns = vars(Incidence),
+    decimals = 1
+  )
+
+table_gt
+
+```
+**Conclusion**: Le tableau montre que la probabilité de récidive du syndrome oculo‑respiratoire est de 42,5 % chez les patients ayant reçu le vaccin Fluviral, contre 8,2 % chez ceux ayant reçu le placebo.
+
+### Calcul de la différence d'incidence et l'intervalle de confiance
+Le tableau ci‑dessous présente la différence des taux d’incidence entre le vaccin Fluviral et le placebo.
+```{r,echo=FALSE}
+ library(dplyr)
+library(gt)
+
+# Extraire les totaux et cas
+n_placebo <- resume_placebo_fluviral$total[resume_placebo_fluviral$traitement_recu == "Placebo"]
+cases_placebo <- resume_placebo_fluviral$cas[resume_placebo_fluviral$traitement_recu == "Placebo"]
+
+n_fluviral <- resume_placebo_fluviral$total[resume_placebo_fluviral$traitement_recu == "Fluviral"]
+cases_fluviral <- resume_placebo_fluviral$cas[resume_placebo_fluviral$traitement_recu == "Fluviral"]
+
+# Calcul de la différence d'incidence et IC 95 %
+p_placebo <- cases_placebo / n_placebo
+p_fluviral <- cases_fluviral / n_fluviral
+diff_incidence <- p_fluviral - p_placebo
+
+se_diff <- sqrt( (p_fluviral*(1-p_fluviral)/n_fluviral) + (p_placebo*(1-p_placebo)/n_placebo) )
+lower_ci <- diff_incidence - 1.96*se_diff
+upper_ci <- diff_incidence + 1.96*se_diff
+
+# Convertir en pourcentage
+diff_incidence_perc <- round(diff_incidence*100, 0)
+lower_ci_perc <- round(lower_ci*100,0)
+upper_ci_perc <- round(upper_ci*100,0)
+
+# Créer la ligne de différence
+diff_row <- data.frame(
+  Comparaison= "Fluviral vs Placebo",
+  Diffrence_incidence= diff_incidence_perc,
+  IC= paste0( "% (IC 95%: ", lower_ci_perc, "-", upper_ci_perc, "%)")
+)
+
+
+# Créer le tableau gt à partir de diff_row
+table_diff_gt <- diff_row %>%
+  gt() %>%
+  tab_header(
+    title = "Différence d'incidence : Fluviral vs Placebo"
+  ) %>%
+  cols_label(
+    Comparaison = "Comparaison",
+    Diffrence_incidence = "Différence d'incidence",
+    IC = "Intervalle de confiance"
+  )
+
+table_diff_gt
+
+
+```
+
+**Conclusion**: La vaccination avec Fluviral augmente la probabilité de récidive du syndrome oculo‑respiratoire de 34 % par rapport au placebo (IC 95 % : 21%‑47 %). Comme l’intervalle de confiance n’inclut pas la valeur nulle, cette différence est statistiquement significative. Cependant, l’intervalle reste relativement large, ce qui reflète une certaine incertitude autour de l’estimation.
+
+## Comparaison des taux d'incidence du syndrome oculo-respiratoire entre le vaccin  Vaxigrip et le placébo
+### Calcul des proportions d'incidice
+Le tableau ci-dessus présente le nombre de cas de syndrome oculo‑respiratoire chez les patients ayant reçu le placebo, comparé à ceux ayant reçu le Vaxigrip, ainsi que les proportion d’incidence correspondants.
+
+```{r,warning=FALSE,echo=FALSE}
+library(dplyr)
+
+df_placebo_vaxigrip <- vaccination %>%
+  filter(
+    traitement %in% c("Placebo-Vaxigrip", "Vaxigrip-Placebo"),
+    traitement_recu %in% c("Placebo", "Vaxigrip")
+  )
+resume_placebo_vaxigrip <- df_placebo_vaxigrip %>%
+  group_by(traitement_recu) %>%
+  summarise(
+    total = n(),
+    cas = sum(SOR_bin),
+    Incidence = mean(SOR_bin)
+  ) %>%
+  ungroup() %>%
+  mutate(Incidence = round(Incidence*100,1))
+
+table_gt1 <- resume_placebo_vaxigrip %>%
+  gt() %>%
+  tab_header(
+    title = "Résumé des cas : Placebo vs Vaxigrip"
+  ) %>%
+  cols_label(
+    traitement_recu = "Vaccin reçu",
+    total = "Nombre total",
+    cas = "Nombre de cas",
+    Incidence = "Incidence (%)"
+  ) %>%
+  fmt_number(
+    columns = vars(Incidence),
+    decimals = 1
+  )
+
+table_gt1
+```
+**Conclusion**: Le tableau indique que la probabilité de récidive du syndrome oculo‑respiratoire est de 28,8 % chez les patients ayant reçu le vaccin Vaxigrip, contre 13,7 % chez ceux ayant reçu le placebo.
+
+### Calcul de la différence d'incidence et l'intervalle de confiance
+Le tableau suivant  présente la différence des taux d’incidence entre le vaccin Vaxigrip et le placebo.
+```{r,echo=FALSE}
+
+# Extraire les totaux et cas
+n_placebo <- resume_placebo_vaxigrip$total[resume_placebo_vaxigrip$traitement_recu == "Placebo"]
+cases_placebo <- resume_placebo_vaxigrip$cas[resume_placebo_vaxigrip$traitement_recu == "Placebo"]
+
+n_vaxigrip <- resume_placebo_vaxigrip$total[resume_placebo_vaxigrip$traitement_recu == "Vaxigrip"]
+cases_vaxigrip <- resume_placebo_vaxigrip$cas[resume_placebo_vaxigrip$traitement_recu == "Vaxigrip"]
+
+#  Calcul de la différence d'incidence et IC 95 %
+p_placebo <- cases_placebo / n_placebo
+p_vaxigrip <- cases_vaxigrip / n_vaxigrip
+diff_incidence <- p_vaxigrip - p_placebo
+
+se_diff <- sqrt( (p_vaxigrip*(1-p_vaxigrip)/n_vaxigrip) + (p_placebo*(1-p_placebo)/n_placebo) )
+lower_ci <- diff_incidence - 1.96*se_diff
+upper_ci <- diff_incidence + 1.96*se_diff
+
+#  Convertir en pourcentage
+diff_incidence_perc <- round(diff_incidence*100, 0)
+lower_ci_perc <- round(lower_ci*100,0)
+upper_ci_perc <- round(upper_ci*100,0)
+
+# Créer la ligne de différence
+diff_row <- data.frame(
+  Comparaison= "Vaxigrip vs Placebo",
+  Diffrence_incidence= diff_incidence_perc,
+  IC= paste0( "% (IC 95%: ", lower_ci_perc, "-", upper_ci_perc, "%)")
+)
+
+#  Créer le tableau gt à partir de diff_row
+table_diff_gt <- diff_row %>%
+  gt() %>%
+  tab_header(
+    title = "Différence d'incidence : Vaxigrip vs Placebo"
+  ) %>%
+  cols_label(
+    Comparaison = "Comparaison",
+    Diffrence_incidence = "Différence d'incidence",
+    IC = "Intervalle de confiance"
+  )
+
+table_diff_gt
+
+```
+
+**Conclusion**: La vaccination avec Vaxigrip augmente la probabilité de récidive du syndrome oculo‑respiratoire de 15 % par rapport au placebo (IC 95 % : 2 %‑28 %). Comme l’intervalle de confiance n’inclut pas zéro, cette différence est statistiquement significative. Néanmoins, l’intervalle reste relativement large, traduisant une certaine incertitude autour de l’estimation.
+
+**Conclusion générale**: Les deux vaccins étudiés, Vaxigrip et Fluviral, augmentent significativement la probabilité de récidive du syndrome oculo‑respiratoire par rapport au placebo, avec des différences d’incidence de 15 % et 34 %, respectivement. Dans les deux cas, les intervalles de confiance ne comprennent pas zéro, indiquant une significativité statistique. Toutefois, la largeur relative de ces intervalles traduit une certaine incertitude autour des estimations, suggérant que les effets réels pourraient varier dans la population.
+
+## Comparaison des taux d'incidence du syndrome oculo-respiratoire entre les vaccins  fluviral et Vaxigrip
