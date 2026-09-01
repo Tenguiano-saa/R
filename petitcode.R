@@ -1,0 +1,2 @@
+donnees=iris
+summary(donnees)
